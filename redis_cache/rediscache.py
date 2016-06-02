@@ -301,6 +301,116 @@ class SimpleCache(object):
         return key
 
 
+"""
+implement cache decorator:
+add update functionality via kwarg update=True
+add check for a combination being actually cached via cached=True, returns bool
+"""
+def cache_task(limit=10000, expire=DEFAULT_EXPIRY, cache=None,
+             use_json=False, namespace=None):
+    """
+    Arguments and function result must be pickleable.
+    :param limit: maximum number of keys to maintain in the set
+    :param expire: period after which an entry in cache is considered expired
+    :param cache: SimpleCache object, if created separately
+    :return: decorated function
+    """
+    cache_ = cache  ## Since python 2.x doesn't have the nonlocal keyword, we need to do this
+    expire_ = expire  ## Same here.
+    def decorator(function):
+        cache, expire = cache_, expire_
+        if cache is None:
+            cache = SimpleCache(limit, expire, hashkeys=True, namespace=function.__module__)
+        elif expire == DEFAULT_EXPIRY:
+            # If the expire arg value is the default, set it to None so we store
+            # the expire value of the passed cache object
+            expire = None
+
+        @wraps(function)
+        def func(*args, **kwargs):
+
+
+            ## Handle cases where caching is down or otherwise not available.
+            if cache.connection is None:
+                result = function(*args, **kwargs)
+                return result
+
+            serializer = json if use_json else pickle
+            fetcher = cache.get_json if use_json else cache.get_pickle
+            storer = cache.store_json if use_json else cache.store_pickle
+
+            ## exec no cached result
+            nocache = kwargs.get("nocache", False)
+            if nocache != False:
+                del kwargs["nocache"]
+                result = function(*args, **kwargs)
+                return result
+
+            ## update result
+            update = kwargs.get("update", False)
+            if update != False:
+                #first get rid of the update kwarg here
+                del kwargs["update"]
+
+                #calc result
+                result = function(*args, **kwargs)
+
+            # check if cached
+            cached = kwargs.get("cached", False)
+            if cached != False:
+                del kwargs["cached"]
+
+            ## Key will be either a md5 hash or just pickle object,
+            ## in the form of `function name`:`key`
+            key = cache.get_hash(serializer.dumps([args, kwargs]))
+            cache_key = '{func_name}:{key}'.format(func_name=function.__name__,
+                                                   key=key)
+
+            if namespace:
+                cache_key = '{namespace}:{key}'.format(namespace=namespace,
+                                                       key=cache_key)
+
+            if cached != False:
+                try:
+                    r = fetcher(cache_key)
+                    return True
+                except (ExpiredKeyException, CacheMissException) as e:
+                    return False
+
+            ## get cached version
+            if update == False:
+                try:
+                    return fetcher(cache_key)
+                except (ExpiredKeyException, CacheMissException) as e:
+                    ## Add some sort of cache miss handing here.
+                    pass
+                except:
+                    logging.exception("Unknown redis-simple-cache error. Please check your Redis free space.")
+
+            ## get no cached result
+            if update == False:
+                try:
+                    result = function(*args, **kwargs)
+                except DoNotCache as e:
+                    result = e.result
+                else:
+                    try:
+                        storer(cache_key, result, expire)
+                    except redis.ConnectionError as e:
+                        logging.exception(e)
+
+            ## to catch update != False
+            else:
+                try:
+                    storer(cache_key, result, expire)
+                except redis.ConnectionError as e:
+                    logging.exception(e)
+
+            return result
+
+        return func
+    return decorator
+
 def cache_it(limit=10000, expire=DEFAULT_EXPIRY, cache=None,
              use_json=False, namespace=None):
     """

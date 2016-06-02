@@ -3,3 +3,4 @@
 .DS_Store
 *.rdb
 *egg*
+*redis_simple_cache.egg-info*
